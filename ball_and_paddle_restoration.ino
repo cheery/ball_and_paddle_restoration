@@ -77,23 +77,30 @@ PROGMEM const unsigned char sevenSegNTSC[] = {
   0b00001100, 0b00001100, 0b11111100, 0b11111100, /* 9 */
 };
 
-
+volatile uint8_t previous_PIND;
+volatile unsigned int leftPaddleINP;
+volatile unsigned int rightPaddleINP;
 int leftPaddle;
 int rightPaddle;
-const char LEFT_POTENTIOMETER=4;
-const char RIGHT_POTENTIOMETER=5;
-const char GAME_SEL=17;
+//const char LEFT_POTENTIOMETER=4;
+//const char RIGHT_POTENTIOMETER=5;
+const char GAME_SEL=13;
 //Use the following instead of a single game select button if preferred
-//const int TENNIS_SEL=17;
-//const int SOCCER_SEL=16;
-//const int SQUASH_SEL=15;
-//const int SOLO_SEL=14;
-const char RESET_SW=5;
-const char PADDLE_SIZE_SW=6;
-const char SPEED_SW=7;
-const char ANGLES_SW=8;
+const int TENNIS_SEL=A0;
+const int SOCCER_SEL=A1;
+const int SQUASH_SEL=A2;
+const int SOLO_SEL=A3;
+const char SERVE_SW=A4;
+const char RESET_SW=A5;
+
+const char ANGLES_SW=4; // these were 2 and 3
+const char SPEED_SW=5;
+const char AUTO_SERVE_SW=6;
+const char PADDLE_SIZE_SW=7;
+char waiting_serve = 1;
+
 const char VERSION_SEL=12;
-const char PAL_NTSC=4;
+const char PAL_NTSC=12;
 char ballVisible=1;
 char attractMode=1;
 char squashActivePlayer=1;
@@ -132,18 +139,22 @@ uint8_t * screen;
 // 5 lines of double-resolution to hold the ball
 uint8_t * doubleResScreen;
 
+const char LEFT_PADDLE_PIN = 2;
+const char RIGHT_PADDLE_PIN = 3;
+
 void setup()  
 {
-  pinMode(LEFT_POTENTIOMETER, INPUT);
-  pinMode(RIGHT_POTENTIOMETER, INPUT);
+  //Serial.begin(9600);
 
-  pinMode(GAME_SEL, INPUT_PULLUP);
-//Use the following instead of a single game select button if preferred
-//  pinMode(TENNIS_SEL, INPUT_PULLUP);
-//  pinMode(SOCCER_SEL, INPUT_PULLUP);
-//  pinMode(SQUASH_SEL, INPUT_PULLUP);
-//  pinMode(SOLO_SEL, INPUT_PULLUP);
+  // GAMATIC 7600 emulator upgrade
+  // Using the following instead of a single game select button
+  pinMode(TENNIS_SEL, INPUT_PULLUP);
+  pinMode(SOCCER_SEL, INPUT_PULLUP);
+  pinMode(SQUASH_SEL, INPUT_PULLUP);
+  pinMode(SOLO_SEL, INPUT_PULLUP);
 
+  pinMode(AUTO_SERVE_SW, INPUT_PULLUP);
+  pinMode(SERVE_SW, INPUT_PULLUP);
   pinMode(RESET_SW, INPUT_PULLUP);
   pinMode(SPEED_SW, INPUT_PULLUP);
   pinMode(ANGLES_SW, INPUT_PULLUP);
@@ -151,12 +162,30 @@ void setup()
   pinMode(VERSION_SEL, INPUT_PULLUP);
   pinMode(PAL_NTSC, INPUT_PULLUP);
 
+  // The new bat handling, this sets up the interrupt registers INT0, INT1
+  //EIMSK &= ~((1 << INT0) | (1 << INT1)); // avoids false interrupts on EICRA
+  //EICRA |= (1 << ISC01)|(1 << ISC00)|(1 << ISC11)|(1 << ISC10);
+  //EIFR &= ~((1 << INTF0) | (1 << INTF1));
+  //EIMSK |= (1 << INT0) | (1 << INT1);
+
   doubleResScreen = (unsigned char*)malloc(10 * 5 * sizeof(unsigned char));
   
   setPAL_NTSC();
   
-
   reset();
+
+
+  pinMode(LEFT_PADDLE_PIN, OUTPUT);
+  digitalWrite(LEFT_PADDLE_PIN, 0);
+  pinMode(RIGHT_PADDLE_PIN, OUTPUT);
+  digitalWrite(RIGHT_PADDLE_PIN, 0);
+
+  // Timer/Counter3
+  TCCR3A = 0; // No PWM
+  TCCR3B = (1 << ICNC1) | (1 << ICES3); // enable rising edge on input capture.
+  TCNT3 = 0;
+  TCCR3B |= (1 << CS31);  // 8 prescaler?
+  TIMSK3 = 0;
 }
 
 void setPAL_NTSC()
@@ -189,25 +218,25 @@ void setGame()
 {
   // Ensure the selection button is pressed for several frames before accepting
   // to debounce it.
-  if (digitalRead(GAME_SEL)==1)
-  {
-     downCount=0;
-  }
-  else if (downCount<10)
-  {
-      downCount=downCount+1;
-  }
-  if (downCount==4)
-  {
-    // Select next game
-    gameNumber=gameNumber+1;
-    if (gameNumber>4)
-    {
-      gameNumber=1;
-    }
-  }
-//Use the following instead of a single game select button if preferred
-/*
+  // if (digitalRead(GAME_SEL)==1)
+  // {
+  //    downCount=0;
+  // }
+  // else if (downCount<10)
+  // {
+  //     downCount=downCount+1;
+  // }
+  // if (downCount==4)
+  // {
+  //   // Select next game
+  //   gameNumber=gameNumber+1;
+  //   if (gameNumber>4)
+  //   {
+  //     gameNumber=1;
+  //   }
+  // }
+  // GAMATIC 7600
+  // Using the following instead of a single game select button
   if (digitalRead(TENNIS_SEL)==0)
   {
     gameNumber=1;
@@ -224,7 +253,6 @@ void setGame()
   {
     gameNumber=4;
   }
-*/
 }
 
 void reset()
@@ -661,7 +689,7 @@ void configureSelectedChipVersion()
 
 void setGameOptionsFromSwitches()
 {
-  if (digitalRead(SPEED_SW)==1)
+  if (digitalRead(SPEED_SW)!=1)
   {
     // Switch to higher speed if not already set
     if (ballSpeed==1)
@@ -706,7 +734,7 @@ void setGameOptionsFromSwitches()
     }   
   }
   
-  if (digitalRead(ANGLES_SW)==1)
+  if (digitalRead(ANGLES_SW)!=1)
   {
     bigAngles=1;   
   }
@@ -726,10 +754,30 @@ void setGameOptionsFromSwitches()
 
 void drawPaddles()
 {
-  leftPaddle=analogRead(LEFT_POTENTIOMETER);
-  rightPaddle=analogRead(RIGHT_POTENTIOMETER);
-  leftPaddle=map(leftPaddle,0,1023,2-paddleHeight,fieldHeight-2);
-  rightPaddle=map(rightPaddle,0,1023,2-paddleHeight,fieldHeight-2);
+    int k, j, n = 150;
+
+    k = map(leftPaddleINP,  350, 38000, 2-paddleHeight, fieldHeight-2);
+    if (k < leftPaddle) {
+        j = map(leftPaddleINP+n,  350, 38000, 2-paddleHeight, fieldHeight-2);
+        if (j < leftPaddle) leftPaddle = j;
+    }
+    if (k > leftPaddle) {
+        j = map(leftPaddleINP-n,  350, 38000, 2-paddleHeight, fieldHeight-2);
+        if (j > leftPaddle) leftPaddle = j;
+    }
+
+    k = map(rightPaddleINP,  350, 38000, 2-paddleHeight, fieldHeight-2);
+    if (k < rightPaddle) {
+        j = map(rightPaddleINP+n,  350, 38000, 2-paddleHeight, fieldHeight-2);
+        if (j < rightPaddle) rightPaddle = j;
+    }
+    if (k > rightPaddle) {
+        j = map(rightPaddleINP-n,  350, 38000, 2-paddleHeight, fieldHeight-2);
+        if (j > rightPaddle) rightPaddle = j;
+    }
+
+  // leftPaddle=map(leftPaddle,0,1023,2-paddleHeight,fieldHeight-2);
+  // rightPaddle=map(rightPaddle,0,1023,2-paddleHeight,fieldHeight-2);
 
   if (gameNumber==1 || gameNumber==2) // Tennis or Football
   {
@@ -757,6 +805,10 @@ void loop()
   // Synchronise, so that this runs once per frame
   delay_frame(1);
 
+  //Serial.print(leftPaddleINP);
+  //Serial.print(" ");
+  //Serial.println(rightPaddleINP);
+
   configureSelectedChipVersion();
 
   clearScreen();  
@@ -772,11 +824,15 @@ void loop()
   drawPaddles();
 
   // If reset button is pressed then don't proceed any further
-  if (digitalRead(RESET_SW)==0)
+  if (digitalRead(RESET_SW)==0 || (waiting_serve==1 && digitalRead(AUTO_SERVE_SW)==1))
   {
     reset();
+    waiting_serve = 1;
+    if (digitalRead(SERVE_SW)==0) waiting_serve = 0;
+
     return;
   }
+  waiting_serve = 0;
   
   // Update the ball position
   ballX=ballX+ballXInc;
@@ -927,53 +983,67 @@ void loop()
 #include <avr/interrupt.h>
 #include <stdlib.h>
 
-//video
-#define PORT_VID	PORTB
-#define	DDR_VID		DDRB
-#define	VID_PIN		2
-//sync
-#define PORT_SYNC	PORTB
-#define DDR_SYNC	DDRB
-#define SYNC_PIN	1
-//sound
-#define PORT_SND	PORTB
-#define DDR_SND		DDRB
-#define	SND_PIN		3
+// Henri Tuhola <henri.tuhola@gmail.com>
+// Reinserted these back in from an another file.
+#include "hardware_setup.h"
+#include "asm_macros.h"
 
-//automatic BST/BLD/ANDI macro definition
-#if VID_PIN == 0
-#define BLD_HWS		"bld	r16,0\n\t"
-#define BST_HWS		"bst	r16,0\n\t"
-#define ANDI_HWS	"andi	r16,0xFE\n"
-#elif VID_PIN == 1
-#define BLD_HWS		"bld	r16,1\n\t"
-#define BST_HWS		"bst	r16,1\n\t"
-#define ANDI_HWS	"andi	r16,0xFD\n"
-#elif VID_PIN == 2
-#define BLD_HWS		"bld	r16,2\n\t"
-#define BST_HWS		"bst	r16,2\n\t"
-#define ANDI_HWS	"andi	r16,0xFB\n"
-#elif VID_PIN == 3
-#define BLD_HWS		"bld	r16,3\n\t"
-#define BST_HWS		"bst	r16,3\n\t"
-#define ANDI_HWS	"andi	r16,0xF7\n"
-#elif VID_PIN == 4
-#define BLD_HWS		"bld	r16,4\n\t"
-#define BST_HWS		"bst	r16,4\n\t"
-#define ANDI_HWS	"andi	r16,0xEF\n"
-#elif VID_PIN == 5
-#define BLD_HWS		"bld	r16,5\n\t"
-#define BST_HWS		"bst	r16,5\n\t"
-#define ANDI_HWS	"andi	r16,0xDF\n"
-#elif VID_PIN == 6
-#define BLD_HWS		"bld	r16,6\n\t"
-#define BST_HWS		"bst	r16,6\n\t"
-#define ANDI_HWS	"andi	r16,0xBF\n"
-#elif VID_PIN == 7
-#define BLD_HWS		"bld	r16,7\n\t"
-#define BST_HWS		"bst	r16,7\n\t"
-#define ANDI_HWS	"andi	r16,0x7F\n"
-#endif
+// //video
+// #define PORT_VID	PORTB
+// #define	DDR_VID		DDRB
+// #define	VID_PIN		4 /* was 2 */
+// //sync
+// #define PORT_SYNC	PORTB
+// #define DDR_SYNC	DDRB
+// #define SYNC_PIN	5 /* was 1 */
+// //sound
+// #define PORT_SND	PORTB
+// #define DDR_SND		DDRB
+// #define	SND_PIN		7 /* was 3 */
+// 
+// #define TCCR2A TCCR0A
+// #define TCCR2B TCCR0B
+// #define OCR2A  OCR0A
+// #define OCR2B  OCR0B
+// #define COM2A0 COM0A0
+// #define COM2A1 COM0A1
+// #define CS20   CS00
+// #define WGM21  WGM01
+// 
+// //automatic BST/BLD/ANDI macro definition
+// #if VID_PIN == 0
+// #define BLD_HWS		"bld	r16,0\n\t"
+// #define BST_HWS		"bst	r16,0\n\t"
+// #define ANDI_HWS	"andi	r16,0xFE\n"
+// #elif VID_PIN == 1
+// #define BLD_HWS		"bld	r16,1\n\t"
+// #define BST_HWS		"bst	r16,1\n\t"
+// #define ANDI_HWS	"andi	r16,0xFD\n"
+// #elif VID_PIN == 2
+// #define BLD_HWS		"bld	r16,2\n\t"
+// #define BST_HWS		"bst	r16,2\n\t"
+// #define ANDI_HWS	"andi	r16,0xFB\n"
+// #elif VID_PIN == 3
+// #define BLD_HWS		"bld	r16,3\n\t"
+// #define BST_HWS		"bst	r16,3\n\t"
+// #define ANDI_HWS	"andi	r16,0xF7\n"
+// #elif VID_PIN == 4
+// #define BLD_HWS		"bld	r16,4\n\t"
+// #define BST_HWS		"bst	r16,4\n\t"
+// #define ANDI_HWS	"andi	r16,0xEF\n"
+// #elif VID_PIN == 5
+// #define BLD_HWS		"bld	r16,5\n\t"
+// #define BST_HWS		"bst	r16,5\n\t"
+// #define ANDI_HWS	"andi	r16,0xDF\n"
+// #elif VID_PIN == 6
+// #define BLD_HWS		"bld	r16,6\n\t"
+// #define BST_HWS		"bst	r16,6\n\t"
+// #define ANDI_HWS	"andi	r16,0xBF\n"
+// #elif VID_PIN == 7
+// #define BLD_HWS		"bld	r16,7\n\t"
+// #define BST_HWS		"bst	r16,7\n\t"
+// #define ANDI_HWS	"andi	r16,0x7F\n"
+// #endif
 
 #define _CYCLES_PER_US			(F_CPU / 1000000)
 
@@ -1022,48 +1092,51 @@ int renderStartOffset;
 void (*lineHandler)() = &empty;
 
 // delay macros
-__asm__ __volatile__ (
-	
-	// delay 3 clock cyles
-	".macro delay3\n\t"
-		"nop\n\t"
-		"nop\n\t"
-		"nop\n"
-	".endm\n"
-	
-	// delay 4 clock cylces
-	".macro delay4\n\t"
-		"nop\n\t"
-		"nop\n\t"
-		"nop\n\t"
-		"nop\n"
-	".endm\n"
-	
-	// delay 5 clock cylces
-	".macro delay5\n\t"
-		"nop\n\t"
-		"nop\n\t"
-		"nop\n\t"
-		"nop\n\t"
-		"nop\n"
-	".endm\n"
-	
-); // end of delay macros
+// __asm__ __volatile__ (
+// 	
+// 	// delay 3 clock cyles
+// 	".macro delay3\n\t"
+// 		"nop\n\t"
+// 		"nop\n\t"
+// 		"nop\n"
+// 	".endm\n"
+// 	
+// 	// delay 4 clock cylces
+// 	".macro delay4\n\t"
+// 		"nop\n\t"
+// 		"nop\n\t"
+// 		"nop\n\t"
+// 		"nop\n"
+// 	".endm\n"
+// 	
+// 	// delay 5 clock cylces
+// 	".macro delay5\n\t"
+// 		"nop\n\t"
+// 		"nop\n\t"
+// 		"nop\n\t"
+// 		"nop\n\t"
+// 		"nop\n"
+// 	".endm\n"
+// 	
+// ); // end of delay macros
+// 
+#define SVPRT "in r16, %[port]\n\t" ANDI_HWS "\n\t"
+#define O1BS  BLD_HWS "\n\tout %[port], r16\n\t"
 
-__asm__ __volatile__ (
-	
-	// save port 16 and clear the video bit
-	".macro svprt p\n\t"
-		"in		r16,\\p\n\t"
-		ANDI_HWS
-	".endm\n"
-	
-	// ouput 1 bit port safe
-	".macro o1bs p\n\t"
-		BLD_HWS
-		"out	\\p,r16\n"
-	".endm\n"
-); // end of output macros
+// __asm__ __volatile__ (
+// 	
+// 	// save port 16 and clear the video bit
+// 	".macro svprt p\n\t"
+// 		"in		r16,\\p\n\t"
+// 		ANDI_HWS
+// 	".endm\n"
+// 	
+// 	// ouput 1 bit port safe
+// 	".macro o1bs p\n\t"
+// 		BLD_HWS
+// 		"out	\\p,r16\n"
+// 	".endm\n"
+// ); // end of output macros
 
 
 char beginVideo(uint8_t x, uint8_t y) {
@@ -1381,24 +1454,25 @@ void renderSetup(uint8_t x, uint8_t y, uint8_t *scrnptr) {
 	vertRes = y;
 	frames = 0;
 	
-        if (palOrNtscMode==1)
-        {
-          linesPerVertPixel = _PAL_LINE_DISPLAY/vertRes;
-          startRenderLine = _PAL_LINE_MID - ((vertRes * linesPerVertPixel)/2);
-          outputDelay = _PAL_CYCLES_OUTPUT_START;
-          vsyncEnd = _PAL_LINE_STOP_VSYNC;
-          linesPerFrame = _PAL_LINE_FRAME;
-          ICR1 = _PAL_CYCLES_SCANLINE;
-        }
-        else
-        {
-	  linesPerVertPixel = _NTSC_LINE_DISPLAY/vertRes;
-          startRenderLine = _NTSC_LINE_MID - ((vertRes * linesPerVertPixel)/2);
-          outputDelay = _NTSC_CYCLES_OUTPUT_START;
-          vsyncEnd = _NTSC_LINE_STOP_VSYNC;
-          linesPerFrame = _NTSC_LINE_FRAME;
-          ICR1 = _NTSC_CYCLES_SCANLINE;
-        }
+    if (palOrNtscMode==1)
+    {
+        linesPerVertPixel = _PAL_LINE_DISPLAY/vertRes;
+        startRenderLine = _PAL_LINE_MID - ((vertRes * linesPerVertPixel)/2);
+        outputDelay = _PAL_CYCLES_OUTPUT_START;
+        vsyncEnd = _PAL_LINE_STOP_VSYNC;
+        linesPerFrame = _PAL_LINE_FRAME;
+        ICR1 = _PAL_CYCLES_SCANLINE;
+    }
+    else
+    {
+        linesPerVertPixel = _NTSC_LINE_DISPLAY/vertRes;
+        startRenderLine = _NTSC_LINE_MID - ((vertRes * linesPerVertPixel)/2);
+        outputDelay = _NTSC_CYCLES_OUTPUT_START;
+        vsyncEnd = _NTSC_LINE_STOP_VSYNC;
+        linesPerFrame = _NTSC_LINE_FRAME;
+        ICR1 = _NTSC_CYCLES_SCANLINE;
+    }
+
 	remainingLinesPerVertPixel = linesPerVertPixel;
 	
 	DDR_VID |= _BV(VID_PIN);
@@ -1421,7 +1495,7 @@ void renderSetup(uint8_t x, uint8_t y, uint8_t *scrnptr) {
 // render a line
 ISR(TIMER1_OVF_vect) {
 	lineHandler();
-        scanLine++;
+    scanLine++;
 }
 
 void empty() {}
@@ -1435,6 +1509,8 @@ void blankLine() {
 	else if (scanLine == linesPerFrame) {
 		lineHandler = &vsyncLine;
 	}
+
+    record_paddles();
 }
 
 static void inline waitUntil(uint8_t time) {
@@ -1480,47 +1556,47 @@ void activeLine() {
 		"ADD	r26,r28\n\t"
 		"ADC	r27,r29\n\t"
 		//save PORTB
-		"svprt	%[port]\n\t"
+        SVPRT /*"svprt	%[port]\n\t"*/
 		
 		"rjmp	enterRend\n"
 	"loopRend:\n\t"
 		"bst	__tmp_reg__,0\n\t"			//8
-		"o1bs	%[port]\n"
+		O1BS /* "o1bs	%[port]\n" */
 	"enterRend:\n\t"
 		"LD	__tmp_reg__,X+\n\t"			//1
-		"delay4\n\t"
+		"nop\n\t nop\n\t nop\n\t nop\n\t" /* delay4 */
 		"bst	__tmp_reg__,7\n\t"
-		"o1bs	%[port]\n\t"
-		"delay5\n\t"						//2
+		O1BS /* "o1bs	%[port]\n" */
+		"nop\n\t nop\n\t nop\n\t nop\n\t nop\n\t" /* delay5 */ // 2
 		"bst	__tmp_reg__,6\n\t"
-		"o1bs	%[port]\n\t"
-		"delay5\n\t"						//3
+		O1BS /* "o1bs	%[port]\n" */
+		"nop\n\t nop\n\t nop\n\t nop\n\t nop\n\t" /* delay5 */ 						//3
 		"bst	__tmp_reg__,5\n\t"
-		"o1bs	%[port]\n\t"
-		"delay5\n\t"						//4
+		O1BS /* "o1bs	%[port]\n" */
+		"nop\n\t nop\n\t nop\n\t nop\n\t nop\n\t" /* delay5 */ 						//4
 		"bst	__tmp_reg__,4\n\t"
-		"o1bs	%[port]\n\t"
-		"delay5\n\t"						//5
+		O1BS /* "o1bs	%[port]\n" */
+		"nop\n\t nop\n\t nop\n\t nop\n\t nop\n\t" /* delay5 */ 						//5
 		"bst	__tmp_reg__,3\n\t"
-		"o1bs	%[port]\n\t"
-		"delay5\n\t"						//6
+		O1BS /* "o1bs	%[port]\n" */
+		"nop\n\t nop\n\t nop\n\t nop\n\t nop\n\t" /* delay5 */ 						//6
 		"bst	__tmp_reg__,2\n\t"
-		"o1bs	%[port]\n\t"
-		"delay5\n\t"						//7
+		O1BS /* "o1bs	%[port]\n" */
+		"nop\n\t nop\n\t nop\n\t nop\n\t nop\n\t" /* delay5 */ 						//7
 		"bst	__tmp_reg__,1\n\t"
-		"o1bs	%[port]\n\t"
+		O1BS /* "o1bs	%[port]\n" */
 		"dec	%[horizRes]\n\t"
 		"breq	exitRend\n\t"					//go too loopsix
 		"jmp	loopRend\n\t"						//5
 	"exitRend:\n\t"
-		"delay3\n\t"
+		"nop\n\t nop\n\t nop\n\t" /* delay3 */
 		"bst	__tmp_reg__,0\n\t"			//8
-		"o1bs	%[port]\n"
+		O1BS /* "o1bs	%[port]\n" */
 		
-		"svprt	%[port]\n\t"
+        SVPRT /*"svprt	%[port]\n\t"*/
 		BST_HWS
-		"delay3\n\t"
-		"o1bs	%[port]\n\t"
+		"nop\n\t nop\n\t nop\n\t" /* delay3 */
+		O1BS /* "o1bs	%[port]\n" */
 		:
 		: [port] "i" (_SFR_IO_ADDR(PORT_VID)),
 		"x" (tempScreen),
@@ -1571,10 +1647,30 @@ void activeLine() {
 		
 	if ((scanLine + 1) == (int)(startRenderLine + (vertRes*linesPerVertPixel)))
 		lineHandler = &blankLine;
-		
+
+    record_paddles();
+}
+
+inline void record_paddles() {
+    uint8_t i = PIND & 3;
+    uint8_t z = previous_PIND ^ i;
+    previous_PIND |= i;
+    if (z) {
+        unsigned int inp = TCNT3;
+        if (z & 1) leftPaddleINP = inp;
+        if (z & 2) rightPaddleINP = inp;
+    }
 }
 
 void vsyncLine() {
+    if (scanLine == 1) {
+        // Clear the capacitors for paddle input.
+        DDRD |= 3; // pinMode(LEFT_PADDLE_PIN, OUTPUT);
+        //PORTD &= ~1; // digitalWrite(LEFT_PADDLE_PIN, 0);
+        //DDRD |= 2; // pinMode(RIGHT_PADDLE_PIN, OUTPUT);
+        //PORTD &= ~2; // digitalWrite(RIGHT_PADDLE_PIN, 0);
+    }
+
 	if (scanLine >= linesPerFrame) {
 		OCR1A = _CYCLES_VERT_SYNC;
 		scanLine = 0;
@@ -1597,6 +1693,12 @@ void vsyncLine() {
 	else if (scanLine == vsyncEnd) {
 		OCR1A = _CYCLES_HORZ_SYNC;
 		lineHandler = &blankLine;
+
+        // Allows the interrupt registers below to fire and detect
+        // paddle position.
+        DDRD &= ~3; // pinMode(LEFT_PADDLE_PIN, INPUT); pinMode(RIGHT_PADDLE_PIN, INPUT);
+        TCNT3 = 0;
+        previous_PIND = 0;
 	}
 }
 
