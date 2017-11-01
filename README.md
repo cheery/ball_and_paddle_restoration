@@ -1,5 +1,7 @@
 # Ball and paddle restoration
 
+This project was requested by The Finnish Museum of Games.
+
 I restored a Gamatic 7600 console by replacing its circuit
 with a perfboard circuit and an Arduino Micro. I put up some
 documentation&code so that the work can be recreated in the
@@ -50,6 +52,8 @@ modified circuit runs on 5V.
 
 
 # Maila ja pallopelin entisöinti
+
+Tämä projekti tehtiin Suomen pelimuseolle.
 
 Korjasin Gamatic 7600 konsolin vaihtamalla sen piirin
 täpläkuparoituun reikälevypiiriin ja Arduino Microon.
